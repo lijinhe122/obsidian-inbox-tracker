@@ -5,7 +5,6 @@ export interface InboxTrackerSettings {
   inboxFolder: string;
   archiveFolder: string;
   urgentDays: number;
-  defaultStatus: string;
   showCompletedTodos: boolean;
 }
 
@@ -13,7 +12,6 @@ export const DEFAULT_SETTINGS: InboxTrackerSettings = {
   inboxFolder: "00-Inbox",
   archiveFolder: "已归档",
   urgentDays: 3,
-  defaultStatus: "待处理",
   showCompletedTodos: true,
 };
 
@@ -65,19 +63,6 @@ export class InboxTrackerSettingTab extends PluginSettingTab {
           .setDynamicTooltip()
           .onChange(async (value) => {
             this.plugin.settings.urgentDays = value;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("默认状态")
-      .setDesc("新建任务时的默认状态文本")
-      .addText((text) =>
-        text
-          .setPlaceholder("待处理")
-          .setValue(this.plugin.settings.defaultStatus)
-          .onChange(async (value) => {
-            this.plugin.settings.defaultStatus = value.trim() || DEFAULT_SETTINGS.defaultStatus;
             await this.plugin.saveSettings();
           })
       );
