@@ -1,11 +1,21 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 import type InboxTrackerPlugin from "./main";
 
+export interface HistoryRecord {
+  id: string;
+  title: string;
+  priority: number;
+  taskType: "quick" | "full";
+  createdAt: string;
+  todoText?: string;
+}
+
 export interface InboxTrackerSettings {
   inboxFolder: string;
   archiveFolder: string;
   urgentDays: number;
   showCompletedTodos: boolean;
+  historyRecords: HistoryRecord[];
 }
 
 export const DEFAULT_SETTINGS: InboxTrackerSettings = {
@@ -13,6 +23,7 @@ export const DEFAULT_SETTINGS: InboxTrackerSettings = {
   archiveFolder: "已归档",
   urgentDays: 3,
   showCompletedTodos: true,
+  historyRecords: [],
 };
 
 export class InboxTrackerSettingTab extends PluginSettingTab {
