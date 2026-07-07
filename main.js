@@ -427,12 +427,49 @@ function shouldReset(task) {
   while (nextCycle.getTime() <= now.getTime()) {
     if (!task.lastNotified)
       return true;
-    const last = parseFlexibleDate(task.lastNotified + " 00:00");
+    const last = parseFlexibleDate(task.lastNotified);
     if (!last || last.getTime() < nextCycle.getTime())
       return true;
     nextCycle = getNextCycleTime(task.recurrence, task.deadlineDate, nextCycle);
   }
   return false;
+}
+async function advanceCycleTask(app, task) {
+  const file = app.vault.getAbstractFileByPath(task.filePath);
+  if (!(file instanceof import_obsidian.TFile) || !task.recurrence || !task.deadlineDate)
+    return;
+  let content = await app.vault.read(file);
+  const lines = content.split("\n");
+  const now = new Date();
+  let nextCycle = getNextCycleTime(task.recurrence, task.deadlineDate, task.deadlineDate);
+  while (nextCycle.getTime() <= now.getTime()) {
+    nextCycle = getNextCycleTime(task.recurrence, task.deadlineDate, nextCycle);
+  }
+  const nextDeadline = `${nextCycle.getFullYear()}-${String(nextCycle.getMonth() + 1).padStart(2, "0")}-${String(nextCycle.getDate()).padStart(2, "0")} ${fmtTime(nextCycle.getHours(), nextCycle.getMinutes())}`;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\*\*截止日期\*\*/.test(lines[i])) {
+      lines[i] = `- **\u622A\u6B62\u65E5\u671F**\uFF1A${nextDeadline}`;
+      break;
+    }
+  }
+  const ts = `${fmtDate(now)} ${fmtTime(now.getHours(), now.getMinutes())}`;
+  let found = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\*\*上次提醒\*\*/.test(lines[i])) {
+      lines[i] = `- **\u4E0A\u6B21\u63D0\u9192**\uFF1A${ts}`;
+      found = true;
+      break;
+    }
+  }
+  if (!found) {
+    for (let i = 0; i < lines.length; i++) {
+      if (/^\*\*优先级\*\*/.test(lines[i])) {
+        lines.splice(i + 1, 0, `- **\u4E0A\u6B21\u63D0\u9192**\uFF1A${ts}`);
+        break;
+      }
+    }
+  }
+  await app.vault.modify(file, lines.join("\n"));
 }
 async function resetCycleTask(app, task) {
   const file = app.vault.getAbstractFileByPath(task.filePath);
@@ -517,13 +554,46 @@ var InboxView = class extends import_obsidian.ItemView {
     }));
     this.refreshTimer = setInterval(() => {
       void this.refresh();
-    }, 6e4);
+    }, 6e5);
   }
   async onClose() {
     if (this.refreshTimer) {
       clearInterval(this.refreshTimer);
       this.refreshTimer = null;
     }
+  }
+  async addHistoryRecord(title, priority, taskType, todos) {
+    const now = fmtDate(new Date());
+    if (taskType === "full") {
+      if (todos && todos.length > 0) {
+        for (const todo of todos) {
+          this.plugin.settings.historyRecords.unshift({
+            id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+            title: todo.text,
+            priority: todo.priority,
+            taskType: "full",
+            createdAt: now
+          });
+        }
+      } else {
+        this.plugin.settings.historyRecords.unshift({
+          id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+          title,
+          priority,
+          taskType: "full",
+          createdAt: now
+        });
+      }
+    } else {
+      this.plugin.settings.historyRecords.unshift({
+        id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+        title,
+        priority,
+        taskType,
+        createdAt: now
+      });
+    }
+    await this.plugin.saveSettings();
   }
   async refresh() {
     const ib = this.s.inboxFolder;
@@ -533,14 +603,18 @@ var InboxView = class extends import_obsidian.ItemView {
     );
     this.tasks = [];
     for (const f of files) {
-      const c = await this.app.vault.read(f);
-      const t = parseInboxFile(c, f.path);
-      if (shouldReset(t)) {
-        await resetCycleTask(this.app, t);
-        const newC = await this.app.vault.read(f);
-        this.tasks.push(parseInboxFile(newC, f.path));
-      } else {
-        this.tasks.push(t);
+      try {
+        const c = await this.app.vault.read(f);
+        const t = parseInboxFile(c, f.path);
+        if (shouldReset(t)) {
+          await resetCycleTask(this.app, t);
+          const newC = await this.app.vault.read(f);
+          this.tasks.push(parseInboxFile(newC, f.path));
+        } else {
+          this.tasks.push(t);
+        }
+      } catch (e) {
+        console.error(`Failed to process file ${f.path}:`, e);
       }
     }
     this.tasks.sort((a, b) => {
@@ -561,7 +635,6 @@ var InboxView = class extends import_obsidian.ItemView {
     c.addClass("inbox-tracker");
     const hdr = c.createDiv({ cls: "it-header" });
     const row = hdr.createDiv({ cls: "it-header-row" });
-    row.createEl("span", { text: "\u4EFB\u52A1\u9762\u677F", cls: "it-logo" });
     const btns = row.createDiv({ cls: "it-btn-group" });
     const quickBtn = btns.createEl("button", { text: "\u5FEB\u901F", cls: "it-btn-quick" });
     quickBtn.addEventListener("click", () => {
@@ -575,6 +648,7 @@ var InboxView = class extends import_obsidian.ItemView {
           await this.app.vault.createFolder(this.s.inboxFolder);
         }
         await this.app.vault.create(`${this.s.inboxFolder}/${fn}.md`, ct);
+        this.addHistoryRecord(title, priority, "quick");
       }).open();
     });
     const addBtn = btns.createEl("button", { text: "\u6279\u91CF", cls: "it-btn-add" });
@@ -588,7 +662,16 @@ var InboxView = class extends import_obsidian.ItemView {
           await this.app.vault.createFolder(this.s.inboxFolder);
         }
         await this.app.vault.create(`${this.s.inboxFolder}/${fn}.md`, ct);
+        this.addHistoryRecord(title, priority, "full", todos);
       }).open();
+    });
+    const historyBtn = btns.createEl("button", { text: "\u8BB0\u5F55", cls: "it-btn-history" });
+    historyBtn.addEventListener("click", () => {
+      new HistoryModal(this.app, this.plugin).open();
+    });
+    const refreshBtn = btns.createEl("button", { text: "\u5237\u65B0", cls: "it-btn-refresh" });
+    refreshBtn.addEventListener("click", () => {
+      void this.refresh();
     });
     const ud = this.s.urgentDays;
     const total = this.tasks.length;
@@ -602,6 +685,7 @@ var InboxView = class extends import_obsidian.ItemView {
       sr.createEl("span", { text: `\u4E34\u8FD1 ${upcoming}`, cls: "it-stat it-stat-upcoming" });
     this.renderDueReminder(c);
     this.renderStatsPanel(c);
+    this.renderFilterPanel(c);
     const list = c.createDiv({ cls: "it-list" });
     if (total === 0) {
       list.createDiv({ cls: "it-empty", text: "\u6E05\u7A7A\u4E86 \u{1F389}" });
@@ -671,39 +755,31 @@ var InboxView = class extends import_obsidian.ItemView {
     undoneChip.addEventListener("click", () => {
       new TodoDetailModal(this.app, "\u672A\u5B8C\u6210", all.filter((x) => !x.completed)).open();
     });
-    if (all.length > 0) {
-      const prioRow = panel.createDiv({ cls: "it-prio-row" });
-      for (let p = 0; p <= 2; p++) {
-        const cnt = all.filter((x) => x.priority === p).length;
-        if (cnt > 0) {
-          const chip = prioRow.createDiv({ cls: "it-prio-chip" });
-          chip.createEl("span", { text: `${PRIORITY_LABELS[p]}` });
-          chip.createEl("span", { text: `${cnt}`, cls: "it-prio-chip-count" });
-          chip.addEventListener("click", () => {
-            new TodoDetailModal(this.app, PRIORITY_LABELS[p], all.filter((x) => x.priority === p)).open();
-          });
-        }
+  }
+  /* ── filter panel ────────────────────── */
+  renderFilterPanel(c) {
+    const all = [];
+    for (const t of this.tasks)
+      for (const td of t.todos) {
+        all.push({ text: td.text, completed: td.completed, priority: td.priority, taskTitle: t.title, filePath: t.filePath, line: td.line, taskType: t.taskType });
       }
-      const typeRow = panel.createDiv({ cls: "it-type-row" });
-      const quickCnt = all.filter((x) => x.taskType === "quick").length;
-      if (quickCnt > 0) {
-        const chip = typeRow.createDiv({ cls: "it-type-chip" });
-        chip.createEl("span", { text: "\u5FEB\u901F" });
-        chip.createEl("span", { text: `${quickCnt}`, cls: "it-type-chip-count" });
-        chip.addEventListener("click", () => {
-          new TodoDetailModal(this.app, "\u5FEB\u901F\u4EFB\u52A1", all.filter((x) => x.taskType === "quick")).open();
-        });
-      }
-      const fullCnt = all.filter((x) => x.taskType === "full").length;
-      if (fullCnt > 0) {
-        const chip = typeRow.createDiv({ cls: "it-type-chip" });
-        chip.createEl("span", { text: "\u6279\u91CF" });
-        chip.createEl("span", { text: `${fullCnt}`, cls: "it-type-chip-count" });
-        chip.addEventListener("click", () => {
-          new TodoDetailModal(this.app, "\u6279\u91CF\u4EFB\u52A1", all.filter((x) => x.taskType === "full")).open();
-        });
-      }
+    if (all.length === 0)
+      return;
+    const panel = c.createDiv({ cls: "it-filter-panel" });
+    for (let p = 0; p <= 2; p++) {
+      const chip = panel.createEl("span", { text: PRIORITY_LABELS[p], cls: `it-filter-tag it-filter-prio-${p}` });
+      chip.addEventListener("click", () => {
+        new TodoDetailModal(this.app, PRIORITY_LABELS[p], all.filter((x) => x.priority === p)).open();
+      });
     }
+    const chipQuick = panel.createEl("span", { text: "\u5FEB\u901F", cls: "it-filter-tag it-filter-type-quick" });
+    chipQuick.addEventListener("click", () => {
+      new TodoDetailModal(this.app, "\u5FEB\u901F\u4EFB\u52A1", all.filter((x) => x.taskType === "quick")).open();
+    });
+    const chipFull = panel.createEl("span", { text: "\u6279\u91CF", cls: "it-filter-tag it-filter-type-full" });
+    chipFull.addEventListener("click", () => {
+      new TodoDetailModal(this.app, "\u6279\u91CF\u4EFB\u52A1", all.filter((x) => x.taskType === "full")).open();
+    });
   }
   /* ── card ──────────────────────────── */
   renderCard(parent, task) {
@@ -728,6 +804,9 @@ var InboxView = class extends import_obsidian.ItemView {
         if (f instanceof import_obsidian.TFile && firstTodo) {
           const nc = toggleTodoInContent(await this.app.vault.read(f), firstTodo.line);
           await this.app.vault.modify(f, nc);
+          if (task.recurrence) {
+            await advanceCycleTask(this.app, task);
+          }
         }
       } catch (e) {
         console.error("Failed to update quick task completion status:", e);
@@ -856,6 +935,9 @@ var InboxView = class extends import_obsidian.ItemView {
           if (f instanceof import_obsidian.TFile) {
             const nc = toggleTodoInContent(await this.app.vault.read(f), td.line);
             await this.app.vault.modify(f, nc);
+            if (task.recurrence) {
+              await advanceCycleTask(this.app, task);
+            }
           }
         });
         const tspan = tr.createEl("span", { text: trunc(td.text, 20), cls: "it-todo-text" });
@@ -910,8 +992,8 @@ var QuickAddModal = class extends import_obsidian.Modal {
     const { contentEl } = this;
     contentEl.addClass("it-modal");
     contentEl.createEl("h2", { text: "\u5FEB\u901F\u6DFB\u52A0", cls: "it-modal-title" });
-    const nameWrap = this.makeField(contentEl, "\u4EFB\u52A1\u540D\u79F0", "\u6700\u591A8\u4E2A\u5B57\uFF0C\u540C\u65F6\u4F5C\u4E3A\u5F85\u529E\u5185\u5BB9");
-    const nameInput = nameWrap.createEl("input", { type: "text", attr: { placeholder: "\u8F93\u5165\u540D\u79F0", maxlength: "8" } });
+    const nameWrap = this.makeField(contentEl, "\u4EFB\u52A1\u540D\u79F0", "\u6700\u591A20\u4E2A\u5B57\uFF0C\u540C\u65F6\u4F5C\u4E3A\u5F85\u529E\u5185\u5BB9");
+    const nameInput = nameWrap.createEl("input", { type: "text", attr: { placeholder: "\u8F93\u5165\u540D\u79F0", maxlength: "20" } });
     nameInput.addEventListener("input", () => this.title = nameInput.value);
     nameInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
@@ -928,7 +1010,7 @@ var QuickAddModal = class extends import_obsidian.Modal {
     const dlWrap = this.makeField(contentEl, "\u5230\u671F\u65F6\u95F4", "\u4E0D\u586B\u5219\u6C38\u4E45");
     dlWrap.style.display = "flex";
     dlWrap.style.gap = "8px";
-    const dateInput = dlWrap.createEl("input", { type: "date" });
+    const dateInput = dlWrap.createEl("input", { type: "date", attr: { min: fmtDate(new Date()) } });
     const timeInput = dlWrap.createEl("input", { type: "time" });
     dateInput.style.flex = "1.5";
     dateInput.style.minWidth = "110px";
@@ -1021,8 +1103,8 @@ var CreateTaskModal = class extends import_obsidian.Modal {
     const { contentEl } = this;
     contentEl.addClass("it-modal");
     contentEl.createEl("h2", { text: "\u6279\u91CF\u65B0\u5EFA\u4EFB\u52A1", cls: "it-modal-title" });
-    const nameWrap = this.makeField(contentEl, "\u4EFB\u52A1\u540D\u79F0", "\u6700\u591A8\u4E2A\u5B57");
-    const nameInput = nameWrap.createEl("input", { type: "text", attr: { placeholder: "\u8F93\u5165\u540D\u79F0", maxlength: "8" } });
+    const nameWrap = this.makeField(contentEl, "\u4EFB\u52A1\u540D\u79F0", "\u6700\u591A20\u4E2A\u5B57");
+    const nameInput = nameWrap.createEl("input", { type: "text", attr: { placeholder: "\u8F93\u5165\u540D\u79F0", maxlength: "20" } });
     nameInput.addEventListener("input", () => this.title = nameInput.value);
     const prioWrap = this.makeField(contentEl, "\u4F18\u5148\u7EA7", "");
     const prioSelect = prioWrap.createEl("select");
@@ -1033,7 +1115,7 @@ var CreateTaskModal = class extends import_obsidian.Modal {
     const dlWrap = this.makeField(contentEl, "\u622A\u6B62\u65E5\u671F", "\u4E0D\u586B\u5219\u6C38\u4E45");
     dlWrap.style.display = "flex";
     dlWrap.style.gap = "8px";
-    const di = dlWrap.createEl("input", { type: "date" });
+    const di = dlWrap.createEl("input", { type: "date", attr: { min: fmtDate(new Date()) } });
     const ti = dlWrap.createEl("input", { type: "time" });
     di.style.flex = "1.5";
     di.style.minWidth = "110px";
@@ -1223,8 +1305,13 @@ var TodoDetailModal = class extends import_obsidian.Modal {
           try {
             const f = this.app.vault.getAbstractFileByPath(it.filePath);
             if (f instanceof import_obsidian.TFile) {
-              const nc = toggleTodoInContent(await this.app.vault.read(f), it.line);
+              const content = await this.app.vault.read(f);
+              const nc = toggleTodoInContent(content, it.line);
               await this.app.vault.modify(f, nc);
+              const task = parseInboxFile(content, it.filePath);
+              if (task.recurrence) {
+                await advanceCycleTask(this.app, task);
+              }
             }
           } catch (e) {
             console.error("Failed to toggle todo:", e);
@@ -1236,6 +1323,154 @@ var TodoDetailModal = class extends import_obsidian.Modal {
           textEl.setAttr("title", it.text);
       }
     }
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+var HistoryModal = class extends import_obsidian.Modal {
+  constructor(app, plugin) {
+    super(app);
+    this.dateFilter = "";
+    this.typeFilter = "all";
+    this.priorityFilter = "all";
+    this.searchKeyword = "";
+    this.sortBy = "date";
+    this.sortOrder = "desc";
+    this.plugin = plugin;
+  }
+  async onOpen() {
+    const { contentEl } = this;
+    contentEl.addClass("it-modal", "it-history-modal");
+    contentEl.createEl("h2", { text: "\u5386\u53F2\u8BB0\u5F55", cls: "it-modal-title" });
+    this.containerEl.style.width = "800px";
+    this.containerEl.style.maxWidth = "90vw";
+    this.containerEl.style.minWidth = "800px";
+    await this.renderFilters(contentEl);
+    await this.renderTable(contentEl);
+  }
+  async renderFilters(parent) {
+    const filterRow = parent.createDiv({ cls: "it-history-filters" });
+    const dateInput = filterRow.createEl("input", { type: "date", cls: "it-history-filter-date" });
+    dateInput.addEventListener("input", () => {
+      this.dateFilter = dateInput.value;
+      void this.refreshTable();
+    });
+    const typeSelect = filterRow.createEl("select", { cls: "it-history-filter-select" });
+    typeSelect.createEl("option", { text: "\u5168\u90E8\u7C7B\u578B", value: "all" });
+    typeSelect.createEl("option", { text: "\u5FEB\u901F\u4EFB\u52A1", value: "quick" });
+    typeSelect.createEl("option", { text: "\u6279\u91CF\u4EFB\u52A1", value: "full" });
+    typeSelect.addEventListener("change", () => {
+      this.typeFilter = typeSelect.value;
+      void this.refreshTable();
+    });
+    const prioritySelect = filterRow.createEl("select", { cls: "it-history-filter-select" });
+    prioritySelect.createEl("option", { text: "\u5168\u90E8\u4F18\u5148\u7EA7", value: "all" });
+    prioritySelect.createEl("option", { text: "\u5FC5\u505A", value: "0" });
+    prioritySelect.createEl("option", { text: "\u91CD\u8981", value: "1" });
+    prioritySelect.createEl("option", { text: "\u4E00\u822C", value: "2" });
+    prioritySelect.addEventListener("change", () => {
+      this.priorityFilter = prioritySelect.value;
+      void this.refreshTable();
+    });
+    const searchInput = filterRow.createEl("input", { type: "text", attr: { placeholder: "\u641C\u7D22\u4EFB\u52A1\u540D\u79F0" }, cls: "it-history-filter-search" });
+    searchInput.addEventListener("input", () => {
+      this.searchKeyword = searchInput.value.toLowerCase();
+      void this.refreshTable();
+    });
+    const sortSelect = filterRow.createEl("select", { cls: "it-history-filter-select" });
+    sortSelect.createEl("option", { text: "\u6309\u65F6\u95F4\u6392\u5E8F", value: "date" });
+    sortSelect.createEl("option", { text: "\u6309\u540D\u79F0\u6392\u5E8F", value: "name" });
+    sortSelect.addEventListener("change", () => {
+      this.sortBy = sortSelect.value;
+      void this.refreshTable();
+    });
+    const sortBtn = filterRow.createEl("button", { text: "\u2191\u2193", cls: "it-history-sort-btn" });
+    sortBtn.addEventListener("click", () => {
+      this.sortOrder = this.sortOrder === "desc" ? "asc" : "desc";
+      void this.refreshTable();
+    });
+    const clearBtn = filterRow.createEl("button", { text: "\u6E05\u9664", cls: "it-history-clear-btn" });
+    clearBtn.addEventListener("click", async () => {
+      this.dateFilter = "";
+      this.typeFilter = "all";
+      this.priorityFilter = "all";
+      this.searchKeyword = "";
+      this.sortBy = "date";
+      this.sortOrder = "desc";
+      dateInput.value = "";
+      typeSelect.value = "all";
+      prioritySelect.value = "all";
+      searchInput.value = "";
+      sortSelect.value = "date";
+      await this.refreshTable();
+    });
+  }
+  async renderTable(parent) {
+    let table = parent.querySelector(".it-history-table-wrapper");
+    if (table)
+      table.remove();
+    table = parent.createDiv({ cls: "it-history-table-wrapper" });
+    const t = table.createEl("table", { cls: "it-history-table" });
+    const thead = t.createEl("thead");
+    const headerRow = thead.createEl("tr");
+    headerRow.createEl("th", { text: "\u5E8F\u53F7" });
+    headerRow.createEl("th", { text: "\u5386\u53F2\u4EFB\u52A1\u540D\u79F0" });
+    headerRow.createEl("th", { text: "\u521B\u5EFA\u65F6\u95F4" });
+    headerRow.createEl("th", { text: "\u7C7B\u578B" });
+    headerRow.createEl("th", { text: "\u4F18\u5148\u7EA7" });
+    headerRow.createEl("th", { text: "\u64CD\u4F5C" });
+    const tbody = t.createEl("tbody");
+    const records = await this.getFilteredRecords();
+    if (records.length === 0) {
+      const emptyRow = tbody.createEl("tr");
+      const emptyCell = emptyRow.createEl("td", { text: "\u6682\u65E0\u5386\u53F2\u8BB0\u5F55", cls: "it-history-empty" });
+      emptyCell.colSpan = 6;
+      return;
+    }
+    records.forEach((record, index) => {
+      const row = tbody.createEl("tr");
+      row.createEl("td", { text: String(index + 1) });
+      row.createEl("td", { text: record.title, cls: "it-history-title" });
+      row.createEl("td", { text: record.createdAt });
+      row.createEl("td", { text: record.taskType === "quick" ? "\u5FEB\u901F" : "\u6279\u91CF" });
+      row.createEl("td", { text: PRIORITY_LABELS[record.priority] });
+      const actionCell = row.createEl("td");
+      const deleteBtn = actionCell.createEl("button", { text: "\u5220\u9664", cls: "it-btn-delete" });
+      deleteBtn.addEventListener("click", async () => {
+        await this.deleteRecord(record.id);
+        await this.refreshTable();
+      });
+    });
+  }
+  async getFilteredRecords() {
+    const records = [...this.plugin.settings.historyRecords];
+    const filtered = records.filter((record) => {
+      if (this.dateFilter && record.createdAt && !record.createdAt.startsWith(this.dateFilter))
+        return false;
+      if (this.typeFilter !== "all" && record.taskType !== this.typeFilter)
+        return false;
+      if (this.priorityFilter !== "all" && String(record.priority) !== this.priorityFilter)
+        return false;
+      if (this.searchKeyword && !record.title.toLowerCase().includes(this.searchKeyword))
+        return false;
+      return true;
+    });
+    filtered.sort((a, b) => {
+      if (this.sortBy === "date") {
+        return this.sortOrder === "desc" ? (b.createdAt || "").localeCompare(a.createdAt || "") : (a.createdAt || "").localeCompare(b.createdAt || "");
+      } else {
+        return this.sortOrder === "desc" ? b.title.localeCompare(a.title) : a.title.localeCompare(b.title);
+      }
+    });
+    return filtered;
+  }
+  async deleteRecord(id) {
+    this.plugin.settings.historyRecords = this.plugin.settings.historyRecords.filter((r) => r.id !== id);
+    await this.plugin.saveSettings();
+  }
+  async refreshTable() {
+    await this.renderTable(this.contentEl);
   }
   onClose() {
     this.contentEl.empty();

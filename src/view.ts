@@ -117,12 +117,82 @@ function shouldReset(task: InboxTask): boolean {
   
   while (nextCycle.getTime() <= now.getTime()) {
     if (!task.lastNotified) return true;
-    const last = parseFlexibleDate(task.lastNotified + " 00:00");
+    const last = parseFlexibleDate(task.lastNotified);
     if (!last || last.getTime() < nextCycle.getTime()) return true;
     nextCycle = getNextCycleTime(task.recurrence, task.deadlineDate, nextCycle);
   }
   
   return false;
+}
+
+/* ── 更新上次提醒时间 ──────────────── */
+async function updateLastNotified(app: App, task: InboxTask): Promise<void> {
+  const file = app.vault.getAbstractFileByPath(task.filePath);
+  if (!(file instanceof TFile)) return;
+  
+  let content = await app.vault.read(file);
+  const lines = content.split("\n");
+  const now = new Date();
+  const ts = `${fmtDate(now)} ${fmtTime(now.getHours(), now.getMinutes())}`;
+  
+  let found = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\*\*上次提醒\*\*/.test(lines[i])) {
+      lines[i] = `- **上次提醒**：${ts}`;
+      found = true;
+      break;
+    }
+  }
+  
+  if (!found) {
+    for (let i = 0; i < lines.length; i++) {
+      if (/^\*\*优先级\*\*/.test(lines[i])) {
+        lines.splice(i + 1, 0, `- **上次提醒**：${ts}`);
+        break;
+      }
+    }
+  }
+  
+  await app.vault.modify(file, lines.join("\n"));
+}
+
+/* ── 推进循环周期 ──────────────────── */
+async function advanceCycleTask(app: App, task: InboxTask): Promise<void> {
+  const file = app.vault.getAbstractFileByPath(task.filePath);
+  if (!(file instanceof TFile) || !task.recurrence || !task.deadlineDate) return;
+  
+  let content = await app.vault.read(file);
+  const lines = content.split("\n");
+  
+  const now = new Date();
+  let nextCycle = getNextCycleTime(task.recurrence, task.deadlineDate, task.deadlineDate);
+  while (nextCycle.getTime() <= now.getTime()) {
+    nextCycle = getNextCycleTime(task.recurrence, task.deadlineDate, nextCycle);
+  }
+  const nextDeadline = `${nextCycle.getFullYear()}-${String(nextCycle.getMonth() + 1).padStart(2, "0")}-${String(nextCycle.getDate()).padStart(2, "0")} ${fmtTime(nextCycle.getHours(), nextCycle.getMinutes())}`;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\*\*截止日期\*\*/.test(lines[i])) {
+      lines[i] = `- **截止日期**：${nextDeadline}`;
+      break;
+    }
+  }
+  
+  const ts = `${fmtDate(now)} ${fmtTime(now.getHours(), now.getMinutes())}`;
+  let found = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\*\*上次提醒\*\*/.test(lines[i])) {
+      lines[i] = `- **上次提醒**：${ts}`; found = true; break;
+    }
+  }
+  if (!found) {
+    for (let i = 0; i < lines.length; i++) {
+      if (/^\*\*优先级\*\*/.test(lines[i])) {
+        lines.splice(i + 1, 0, `- **上次提醒**：${ts}`); break;
+      }
+    }
+  }
+  
+  await app.vault.modify(file, lines.join("\n"));
 }
 
 /* ── 执行循环重置 ──────────────────── */
@@ -210,7 +280,7 @@ export class InboxView extends ItemView {
     
     this.refreshTimer = setInterval(() => {
       void this.refresh();
-    }, 60000);
+    }, 600000);
   }
 
   async onClose() {
@@ -218,6 +288,40 @@ export class InboxView extends ItemView {
       clearInterval(this.refreshTimer);
       this.refreshTimer = null;
     }
+  }
+
+  async addHistoryRecord(title: string, priority: number, taskType: "quick" | "full", todos?: { text: string; priority: number }[]) {
+    const now = fmtDate(new Date());
+    if (taskType === "full") {
+      if (todos && todos.length > 0) {
+        for (const todo of todos) {
+          this.plugin.settings.historyRecords.unshift({
+            id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+            title: todo.text,
+            priority: todo.priority,
+            taskType: "full",
+            createdAt: now,
+          });
+        }
+      } else {
+        this.plugin.settings.historyRecords.unshift({
+          id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+          title,
+          priority,
+          taskType: "full",
+          createdAt: now,
+        });
+      }
+    } else {
+      this.plugin.settings.historyRecords.unshift({
+        id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+        title,
+        priority,
+        taskType,
+        createdAt: now,
+      });
+    }
+    await this.plugin.saveSettings();
   }
 
   async refresh() {
@@ -228,15 +332,18 @@ export class InboxView extends ItemView {
     );
     this.tasks = [];
     for (const f of files) {
-      const c = await this.app.vault.read(f);
-      const t = parseInboxFile(c, f.path);
-      // 检查是否应该重置
-      if (shouldReset(t)) {
-        await resetCycleTask(this.app, t);
-        const newC = await this.app.vault.read(f);
-        this.tasks.push(parseInboxFile(newC, f.path));
-      } else {
-        this.tasks.push(t);
+      try {
+        const c = await this.app.vault.read(f);
+        const t = parseInboxFile(c, f.path);
+        if (shouldReset(t)) {
+          await resetCycleTask(this.app, t);
+          const newC = await this.app.vault.read(f);
+          this.tasks.push(parseInboxFile(newC, f.path));
+        } else {
+          this.tasks.push(t);
+        }
+      } catch (e) {
+        console.error(`Failed to process file ${f.path}:`, e);
       }
     }
     this.tasks.sort((a, b) => {
@@ -256,7 +363,6 @@ export class InboxView extends ItemView {
     // header
     const hdr = c.createDiv({ cls: "it-header" });
     const row = hdr.createDiv({ cls: "it-header-row" });
-    row.createEl("span", { text: "任务面板", cls: "it-logo" });
     const btns = row.createDiv({ cls: "it-btn-group" });
 
     const quickBtn = btns.createEl("button", { text: "快速", cls: "it-btn-quick" });
@@ -271,6 +377,8 @@ export class InboxView extends ItemView {
           await this.app.vault.createFolder(this.s.inboxFolder);
         }
         await this.app.vault.create(`${this.s.inboxFolder}/${fn}.md`, ct);
+
+        this.addHistoryRecord(title, priority, "quick");
       }).open();
     });
 
@@ -285,7 +393,19 @@ export class InboxView extends ItemView {
           await this.app.vault.createFolder(this.s.inboxFolder);
         }
         await this.app.vault.create(`${this.s.inboxFolder}/${fn}.md`, ct);
+
+        this.addHistoryRecord(title, priority, "full", todos);
       }).open();
+    });
+
+    const historyBtn = btns.createEl("button", { text: "记录", cls: "it-btn-history" });
+    historyBtn.addEventListener("click", () => {
+      new HistoryModal(this.app, this.plugin).open();
+    });
+
+    const refreshBtn = btns.createEl("button", { text: "刷新", cls: "it-btn-refresh" });
+    refreshBtn.addEventListener("click", () => {
+      void this.refresh();
     });
 
     // 统计标签
@@ -303,6 +423,9 @@ export class InboxView extends ItemView {
 
     // 统计面板
     this.renderStatsPanel(c);
+
+    // 筛选面板
+    this.renderFilterPanel(c);
 
     // 列表
     const list = c.createDiv({ cls: "it-list" });
@@ -348,8 +471,8 @@ export class InboxView extends ItemView {
     }
     const doneN = all.filter(x => x.completed).length;
     const undoneN = all.filter(x => !x.completed).length;
-    const panel = c.createDiv({ cls: "it-stats-panel" });
 
+    const panel = c.createDiv({ cls: "it-stats-panel" });
     const statusRow = panel.createDiv({ cls: "it-stat-row" });
 
     const doneChip = statusRow.createDiv({ cls: "it-stat-chip it-stat-chip-done" });
@@ -361,35 +484,28 @@ export class InboxView extends ItemView {
     undoneChip.createEl("span", { text: "未完成", cls: "it-stat-chip-label" });
     undoneChip.createEl("span", { text: `${undoneN}`, cls: "it-stat-chip-count" });
     undoneChip.addEventListener("click", () => { new TodoDetailModal(this.app, "未完成", all.filter(x => !x.completed)).open(); });
+  }
 
-    if (all.length > 0) {
-      const prioRow = panel.createDiv({ cls: "it-prio-row" });
-      for (let p = 0; p <= 2; p++) {
-        const cnt = all.filter(x => x.priority === p).length;
-        if (cnt > 0) {
-          const chip = prioRow.createDiv({ cls: "it-prio-chip" });
-          chip.createEl("span", { text: `${PRIORITY_LABELS[p]}` });
-          chip.createEl("span", { text: `${cnt}`, cls: "it-prio-chip-count" });
-          chip.addEventListener("click", () => { new TodoDetailModal(this.app, PRIORITY_LABELS[p], all.filter(x => x.priority === p)).open(); });
-        }
-      }
-
-      const typeRow = panel.createDiv({ cls: "it-type-row" });
-      const quickCnt = all.filter(x => x.taskType === "quick").length;
-      if (quickCnt > 0) {
-        const chip = typeRow.createDiv({ cls: "it-type-chip" });
-        chip.createEl("span", { text: "快速" });
-        chip.createEl("span", { text: `${quickCnt}`, cls: "it-type-chip-count" });
-        chip.addEventListener("click", () => { new TodoDetailModal(this.app, "快速任务", all.filter(x => x.taskType === "quick")).open(); });
-      }
-      const fullCnt = all.filter(x => x.taskType === "full").length;
-      if (fullCnt > 0) {
-        const chip = typeRow.createDiv({ cls: "it-type-chip" });
-        chip.createEl("span", { text: "批量" });
-        chip.createEl("span", { text: `${fullCnt}`, cls: "it-type-chip-count" });
-        chip.addEventListener("click", () => { new TodoDetailModal(this.app, "批量任务", all.filter(x => x.taskType === "full")).open(); });
-      }
+  /* ── filter panel ────────────────────── */
+  private renderFilterPanel(c: HTMLElement) {
+    const all: { text: string; completed: boolean; priority: number; taskTitle: string; filePath: string; line: number; taskType: "quick" | "full" }[] = [];
+    for (const t of this.tasks) for (const td of t.todos) {
+      all.push({ text: td.text, completed: td.completed, priority: td.priority, taskTitle: t.title, filePath: t.filePath, line: td.line, taskType: t.taskType });
     }
+    if (all.length === 0) return;
+
+    const panel = c.createDiv({ cls: "it-filter-panel" });
+
+    for (let p = 0; p <= 2; p++) {
+      const chip = panel.createEl("span", { text: PRIORITY_LABELS[p], cls: `it-filter-tag it-filter-prio-${p}` });
+      chip.addEventListener("click", () => { new TodoDetailModal(this.app, PRIORITY_LABELS[p], all.filter(x => x.priority === p)).open(); });
+    }
+
+    const chipQuick = panel.createEl("span", { text: "快速", cls: "it-filter-tag it-filter-type-quick" });
+    chipQuick.addEventListener("click", () => { new TodoDetailModal(this.app, "快速任务", all.filter(x => x.taskType === "quick")).open(); });
+    
+    const chipFull = panel.createEl("span", { text: "批量", cls: "it-filter-tag it-filter-type-full" });
+    chipFull.addEventListener("click", () => { new TodoDetailModal(this.app, "批量任务", all.filter(x => x.taskType === "full")).open(); });
   }
 
   /* ── card ──────────────────────────── */
@@ -418,6 +534,9 @@ export class InboxView extends ItemView {
         if (f instanceof TFile && firstTodo) {
           const nc = toggleTodoInContent(await this.app.vault.read(f), firstTodo.line);
           await this.app.vault.modify(f, nc);
+          if (task.recurrence) {
+            await advanceCycleTask(this.app, task);
+          }
         }
       } catch (e) {
         console.error("Failed to update quick task completion status:", e);
@@ -549,6 +668,9 @@ export class InboxView extends ItemView {
           if (f instanceof TFile) {
             const nc = toggleTodoInContent(await this.app.vault.read(f), td.line);
             await this.app.vault.modify(f, nc);
+            if (task.recurrence) {
+              await advanceCycleTask(this.app, task);
+            }
           }
         });
         const tspan = tr.createEl("span", { text: trunc(td.text, 20), cls: "it-todo-text" });
@@ -610,8 +732,8 @@ class QuickAddModal extends Modal {
     contentEl.createEl("h2", { text: "快速添加", cls: "it-modal-title" });
 
     // ── 任务名称（即待办内容） ──
-    const nameWrap = this.makeField(contentEl, "任务名称", "最多8个字，同时作为待办内容");
-    const nameInput = nameWrap.createEl("input", { type: "text", attr: { placeholder: "输入名称", maxlength: "8" } });
+    const nameWrap = this.makeField(contentEl, "任务名称", "最多20个字，同时作为待办内容");
+    const nameInput = nameWrap.createEl("input", { type: "text", attr: { placeholder: "输入名称", maxlength: "20" } });
     nameInput.addEventListener("input", () => this.title = nameInput.value);
     nameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { void this.submit(); } });
 
@@ -627,7 +749,7 @@ class QuickAddModal extends Modal {
     // ── 到期时间 ──
     const dlWrap = this.makeField(contentEl, "到期时间", "不填则永久");
     dlWrap.style.display = "flex"; dlWrap.style.gap = "8px";
-    const dateInput = dlWrap.createEl("input", { type: "date" });
+    const dateInput = dlWrap.createEl("input", { type: "date", attr: { min: fmtDate(new Date()) } });
     const timeInput = dlWrap.createEl("input", { type: "time" });
     dateInput.style.flex = "1.5"; dateInput.style.minWidth = "110px";
     timeInput.style.flex = "1";   timeInput.style.minWidth = "80px";
@@ -713,8 +835,8 @@ class CreateTaskModal extends Modal {
     contentEl.createEl("h2", { text: "批量新建任务", cls: "it-modal-title" });
 
     // ── 名称 ──
-    const nameWrap = this.makeField(contentEl, "任务名称", "最多8个字");
-    const nameInput = nameWrap.createEl("input", { type: "text", attr: { placeholder: "输入名称", maxlength: "8" } });
+    const nameWrap = this.makeField(contentEl, "任务名称", "最多20个字");
+    const nameInput = nameWrap.createEl("input", { type: "text", attr: { placeholder: "输入名称", maxlength: "20" } });
     nameInput.addEventListener("input", () => this.title = nameInput.value);
 
     // ── 优先级 ──
@@ -727,7 +849,7 @@ class CreateTaskModal extends Modal {
     // ── 截止日期 ──
     const dlWrap = this.makeField(contentEl, "截止日期", "不填则永久");
     dlWrap.style.display = "flex"; dlWrap.style.gap = "8px";
-    const di = dlWrap.createEl("input", { type: "date" });
+    const di = dlWrap.createEl("input", { type: "date", attr: { min: fmtDate(new Date()) } });
     const ti = dlWrap.createEl("input", { type: "time" });
     di.style.flex = "1.5"; di.style.minWidth = "110px";
     ti.style.flex = "1";   ti.style.minWidth = "80px";
@@ -888,8 +1010,13 @@ class TodoDetailModal extends Modal {
           try {
             const f = this.app.vault.getAbstractFileByPath(it.filePath);
             if (f instanceof TFile) {
-              const nc = toggleTodoInContent(await this.app.vault.read(f), it.line);
+              const content = await this.app.vault.read(f);
+              const nc = toggleTodoInContent(content, it.line);
               await this.app.vault.modify(f, nc);
+              const task = parseInboxFile(content, it.filePath);
+              if (task.recurrence) {
+                await advanceCycleTask(this.app, task);
+              }
             }
           } catch (e) {
             console.error("Failed to toggle todo:", e);
@@ -902,4 +1029,174 @@ class TodoDetailModal extends Modal {
     }
   }
   onClose() { this.contentEl.empty(); }
+}
+
+class HistoryModal extends Modal {
+  private dateFilter = "";
+  private typeFilter = "all";
+  private priorityFilter = "all";
+  private searchKeyword = "";
+  private sortBy = "date";
+  private sortOrder = "desc";
+  private plugin: InboxTrackerPlugin;
+
+  constructor(app: App, plugin: InboxTrackerPlugin) {
+    super(app);
+    this.plugin = plugin;
+  }
+
+  async onOpen() {
+    const { contentEl } = this;
+    contentEl.addClass("it-modal", "it-history-modal");
+    contentEl.createEl("h2", { text: "历史记录", cls: "it-modal-title" });
+    this.containerEl.style.width = "800px";
+    this.containerEl.style.maxWidth = "90vw";
+    this.containerEl.style.minWidth = "800px";
+    await this.renderFilters(contentEl);
+    await this.renderTable(contentEl);
+  }
+
+  private async renderFilters(parent: HTMLElement) {
+    const filterRow = parent.createDiv({ cls: "it-history-filters" });
+    
+    const dateInput = filterRow.createEl("input", { type: "date", cls: "it-history-filter-date" });
+    dateInput.addEventListener("input", () => {
+      this.dateFilter = dateInput.value;
+      void this.refreshTable();
+    });
+    
+    const typeSelect = filterRow.createEl("select", { cls: "it-history-filter-select" });
+    typeSelect.createEl("option", { text: "全部类型", value: "all" });
+    typeSelect.createEl("option", { text: "快速任务", value: "quick" });
+    typeSelect.createEl("option", { text: "批量任务", value: "full" });
+    typeSelect.addEventListener("change", () => {
+      this.typeFilter = typeSelect.value;
+      void this.refreshTable();
+    });
+    
+    const prioritySelect = filterRow.createEl("select", { cls: "it-history-filter-select" });
+    prioritySelect.createEl("option", { text: "全部优先级", value: "all" });
+    prioritySelect.createEl("option", { text: "必做", value: "0" });
+    prioritySelect.createEl("option", { text: "重要", value: "1" });
+    prioritySelect.createEl("option", { text: "一般", value: "2" });
+    prioritySelect.addEventListener("change", () => {
+      this.priorityFilter = prioritySelect.value;
+      void this.refreshTable();
+    });
+    
+    const searchInput = filterRow.createEl("input", { type: "text", attr: { placeholder: "搜索任务名称" }, cls: "it-history-filter-search" });
+    searchInput.addEventListener("input", () => {
+      this.searchKeyword = searchInput.value.toLowerCase();
+      void this.refreshTable();
+    });
+    
+    const sortSelect = filterRow.createEl("select", { cls: "it-history-filter-select" });
+    sortSelect.createEl("option", { text: "按时间排序", value: "date" });
+    sortSelect.createEl("option", { text: "按名称排序", value: "name" });
+    sortSelect.addEventListener("change", () => {
+      this.sortBy = sortSelect.value;
+      void this.refreshTable();
+    });
+    
+    const sortBtn = filterRow.createEl("button", { text: "↑↓", cls: "it-history-sort-btn" });
+    sortBtn.addEventListener("click", () => {
+      this.sortOrder = this.sortOrder === "desc" ? "asc" : "desc";
+      void this.refreshTable();
+    });
+    
+    const clearBtn = filterRow.createEl("button", { text: "清除", cls: "it-history-clear-btn" });
+    clearBtn.addEventListener("click", async () => {
+      this.dateFilter = "";
+      this.typeFilter = "all";
+      this.priorityFilter = "all";
+      this.searchKeyword = "";
+      this.sortBy = "date";
+      this.sortOrder = "desc";
+      dateInput.value = "";
+      typeSelect.value = "all";
+      prioritySelect.value = "all";
+      searchInput.value = "";
+      sortSelect.value = "date";
+      await this.refreshTable();
+    });
+  }
+
+  private async renderTable(parent: HTMLElement) {
+    let table = parent.querySelector(".it-history-table-wrapper");
+    if (table) table.remove();
+    
+    table = parent.createDiv({ cls: "it-history-table-wrapper" });
+    const t = table.createEl("table", { cls: "it-history-table" });
+    const thead = t.createEl("thead");
+    const headerRow = thead.createEl("tr");
+    headerRow.createEl("th", { text: "序号" });
+    headerRow.createEl("th", { text: "历史任务名称" });
+    headerRow.createEl("th", { text: "创建时间" });
+    headerRow.createEl("th", { text: "类型" });
+    headerRow.createEl("th", { text: "优先级" });
+    headerRow.createEl("th", { text: "操作" });
+    
+    const tbody = t.createEl("tbody");
+    const records = await this.getFilteredRecords();
+    
+    if (records.length === 0) {
+      const emptyRow = tbody.createEl("tr");
+      const emptyCell = emptyRow.createEl("td", { text: "暂无历史记录", cls: "it-history-empty" });
+      emptyCell.colSpan = 6;
+      return;
+    }
+    
+    records.forEach((record, index) => {
+      const row = tbody.createEl("tr");
+      row.createEl("td", { text: String(index + 1) });
+      row.createEl("td", { text: record.title, cls: "it-history-title" });
+      row.createEl("td", { text: record.createdAt });
+      row.createEl("td", { text: record.taskType === "quick" ? "快速" : "批量" });
+      row.createEl("td", { text: PRIORITY_LABELS[record.priority] });
+      const actionCell = row.createEl("td");
+      const deleteBtn = actionCell.createEl("button", { text: "删除", cls: "it-btn-delete" });
+      deleteBtn.addEventListener("click", async () => {
+        await this.deleteRecord(record.id);
+        await this.refreshTable();
+      });
+    });
+  }
+
+  private async getFilteredRecords() {
+    const records = [...this.plugin.settings.historyRecords];
+    const filtered = records.filter(record => {
+      if (this.dateFilter && record.createdAt && !record.createdAt.startsWith(this.dateFilter)) return false;
+      if (this.typeFilter !== "all" && record.taskType !== this.typeFilter) return false;
+      if (this.priorityFilter !== "all" && String(record.priority) !== this.priorityFilter) return false;
+      if (this.searchKeyword && !record.title.toLowerCase().includes(this.searchKeyword)) return false;
+      return true;
+    });
+    
+    filtered.sort((a, b) => {
+      if (this.sortBy === "date") {
+        return this.sortOrder === "desc"
+          ? (b.createdAt || "").localeCompare(a.createdAt || "")
+          : (a.createdAt || "").localeCompare(b.createdAt || "");
+      } else {
+        return this.sortOrder === "desc"
+          ? b.title.localeCompare(a.title)
+          : a.title.localeCompare(b.title);
+      }
+    });
+    
+    return filtered;
+  }
+
+  private async deleteRecord(id: string) {
+    this.plugin.settings.historyRecords = this.plugin.settings.historyRecords.filter(r => r.id !== id);
+    await this.plugin.saveSettings();
+  }
+
+  private async refreshTable() {
+    await this.renderTable(this.contentEl);
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
 }
