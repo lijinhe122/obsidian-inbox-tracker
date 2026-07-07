@@ -1,4 +1,4 @@
-import { ItemView, WorkspaceLeaf, TFile, TFolder, Modal, App, Setting } from "obsidian";
+import { ItemView, WorkspaceLeaf, TFile, Modal, App, Setting } from "obsidian";
 import { InboxTask, PRIORITY_LABELS, Recurrence } from "./types";
 import {
   parseInboxFile, toggleTodoInContent, generateTaskContent,
@@ -190,18 +190,10 @@ export class InboxView extends ItemView {
   }
   private get s(): InboxTrackerSettings { return this.plugin.settings; }
   getViewType() { return VIEW_TYPE_INBOX; }
-  getDisplayText() { return "任务面板"; }
+  getDisplayText() { return ""; }
   getIcon() { return "inbox"; }
 
   async onOpen() {
-    this.containerEl.style.height = "100%";
-    const child = this.containerEl.children[1] as HTMLElement;
-    if (child) {
-      child.style.height = "100%";
-      child.style.display = "flex";
-      child.style.flexDirection = "column";
-      child.style.overflow = "hidden";
-    }
     await this.refresh();
     this.registerEvent(this.app.vault.on("modify", (file) => {
       if (file.path.startsWith(this.s.inboxFolder)) this.refresh();
@@ -256,40 +248,6 @@ export class InboxView extends ItemView {
     this.render();
   }
 
-  private async addHistoryRecord(title: string, priority: number, taskType: "quick" | "full", todos?: { text: string; priority: number }[]) {
-    const now = fmtDate(new Date());
-    if (taskType === "full") {
-      if (todos && todos.length > 0) {
-        for (const todo of todos) {
-          this.plugin.settings.historyRecords.unshift({
-            id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-            title: todo.text,
-            priority: todo.priority,
-            taskType: "full",
-            createdAt: now,
-          });
-        }
-      } else {
-        this.plugin.settings.historyRecords.unshift({
-          id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-          title,
-          priority,
-          taskType: "full",
-          createdAt: now,
-        });
-      }
-    } else {
-      this.plugin.settings.historyRecords.unshift({
-        id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-        title,
-        priority,
-        taskType,
-        createdAt: now,
-      });
-    }
-    await this.plugin.saveSettings();
-  }
-
   /* ── render ─────────────────────────── */
   private render() {
     const c = this.containerEl.children[1] as HTMLElement;
@@ -313,8 +271,6 @@ export class InboxView extends ItemView {
           await this.app.vault.createFolder(this.s.inboxFolder);
         }
         await this.app.vault.create(`${this.s.inboxFolder}/${fn}.md`, ct);
-
-        this.addHistoryRecord(title, priority, "quick");
       }).open();
     });
 
@@ -329,14 +285,7 @@ export class InboxView extends ItemView {
           await this.app.vault.createFolder(this.s.inboxFolder);
         }
         await this.app.vault.create(`${this.s.inboxFolder}/${fn}.md`, ct);
-
-        this.addHistoryRecord(title, priority, "full", todos);
       }).open();
-    });
-
-    const historyBtn = btns.createEl("button", { text: "记录", cls: "it-btn-history" });
-    historyBtn.addEventListener("click", () => {
-      new HistoryModal(this.app, this.plugin).open();
     });
 
     // 统计标签
@@ -354,9 +303,6 @@ export class InboxView extends ItemView {
 
     // 统计面板
     this.renderStatsPanel(c);
-
-    // 筛选面板
-    this.renderFiltersPanel(c);
 
     // 列表
     const list = c.createDiv({ cls: "it-list" });
@@ -415,30 +361,35 @@ export class InboxView extends ItemView {
     undoneChip.createEl("span", { text: "未完成", cls: "it-stat-chip-label" });
     undoneChip.createEl("span", { text: `${undoneN}`, cls: "it-stat-chip-count" });
     undoneChip.addEventListener("click", () => { new TodoDetailModal(this.app, "未完成", all.filter(x => !x.completed)).open(); });
-  }
 
-  /* ── filters panel ──────────────────── */
-  private renderFiltersPanel(c: HTMLElement) {
-    const all: { text: string; completed: boolean; priority: number; taskTitle: string; filePath: string; line: number; taskType: "quick" | "full" }[] = [];
-    for (const t of this.tasks) for (const td of t.todos) {
-      all.push({ text: td.text, completed: td.completed, priority: td.priority, taskTitle: t.title, filePath: t.filePath, line: td.line, taskType: t.taskType });
+    if (all.length > 0) {
+      const prioRow = panel.createDiv({ cls: "it-prio-row" });
+      for (let p = 0; p <= 2; p++) {
+        const cnt = all.filter(x => x.priority === p).length;
+        if (cnt > 0) {
+          const chip = prioRow.createDiv({ cls: "it-prio-chip" });
+          chip.createEl("span", { text: `${PRIORITY_LABELS[p]}` });
+          chip.createEl("span", { text: `${cnt}`, cls: "it-prio-chip-count" });
+          chip.addEventListener("click", () => { new TodoDetailModal(this.app, PRIORITY_LABELS[p], all.filter(x => x.priority === p)).open(); });
+        }
+      }
+
+      const typeRow = panel.createDiv({ cls: "it-type-row" });
+      const quickCnt = all.filter(x => x.taskType === "quick").length;
+      if (quickCnt > 0) {
+        const chip = typeRow.createDiv({ cls: "it-type-chip" });
+        chip.createEl("span", { text: "快速" });
+        chip.createEl("span", { text: `${quickCnt}`, cls: "it-type-chip-count" });
+        chip.addEventListener("click", () => { new TodoDetailModal(this.app, "快速任务", all.filter(x => x.taskType === "quick")).open(); });
+      }
+      const fullCnt = all.filter(x => x.taskType === "full").length;
+      if (fullCnt > 0) {
+        const chip = typeRow.createDiv({ cls: "it-type-chip" });
+        chip.createEl("span", { text: "批量" });
+        chip.createEl("span", { text: `${fullCnt}`, cls: "it-type-chip-count" });
+        chip.addEventListener("click", () => { new TodoDetailModal(this.app, "批量任务", all.filter(x => x.taskType === "full")).open(); });
+      }
     }
-
-    const filterPanel = c.createDiv({ cls: "it-filters-panel" });
-
-    for (let p = 0; p <= 2; p++) {
-      const chip = filterPanel.createDiv({ cls: `it-filter-chip prio-${p}` });
-      chip.createEl("span", { text: PRIORITY_LABELS[p] });
-      chip.addEventListener("click", () => { new TodoDetailModal(this.app, PRIORITY_LABELS[p], all.filter(x => x.priority === p)).open(); });
-    }
-
-    const chip1 = filterPanel.createDiv({ cls: "it-filter-chip type-quick" });
-    chip1.createEl("span", { text: "快速" });
-    chip1.addEventListener("click", () => { new TodoDetailModal(this.app, "快速任务", all.filter(x => x.taskType === "quick")).open(); });
-
-    const chip2 = filterPanel.createDiv({ cls: "it-filter-chip type-full" });
-    chip2.createEl("span", { text: "批量" });
-    chip2.addEventListener("click", () => { new TodoDetailModal(this.app, "批量任务", all.filter(x => x.taskType === "full")).open(); });
   }
 
   /* ── card ──────────────────────────── */
@@ -478,10 +429,8 @@ export class InboxView extends ItemView {
     }
 
     const todoText = task.todos.length > 0 ? task.todos[0].text : task.title;
-    const nameEl = r1.createEl("span", { text: todoText, cls: "it-card-name" });
-    nameEl.setAttr("data-tooltip", todoText);
-    nameEl.addEventListener("mouseenter", (e) => this.showTooltip(e, todoText));
-    nameEl.addEventListener("mouseleave", () => this.hideTooltip());
+    const nameEl = r1.createEl("span", { text: trunc(todoText, 20), cls: "it-card-name" });
+    if (todoText.length > 20) nameEl.setAttr("title", todoText);
     nameEl.addEventListener("click", () => {
       const f = this.app.vault.getAbstractFileByPath(task.filePath);
       if (f instanceof TFile) { void this.app.workspace.getLeaf(false).openFile(f); }
@@ -525,9 +474,7 @@ export class InboxView extends ItemView {
       r1.createEl("span", { text: PRIORITY_LABELS[task.priority], cls: `it-card-prio it-prio-${task.priority}` });
     }
     const nameEl = r1.createEl("span", { text: trunc(task.title, 8), cls: "it-card-name" });
-    nameEl.setAttr("data-tooltip", task.title);
-    nameEl.addEventListener("mouseenter", (e) => this.showTooltip(e, task.title));
-    nameEl.addEventListener("mouseleave", () => this.hideTooltip());
+    if (task.title.length > 8) nameEl.setAttr("title", task.title);
     nameEl.addEventListener("click", () => {
       const f = this.app.vault.getAbstractFileByPath(task.filePath);
       if (f instanceof TFile) { void this.app.workspace.getLeaf(false).openFile(f); }
@@ -588,11 +535,8 @@ export class InboxView extends ItemView {
       fill.style.width = `${pct}%`;
       prog.createEl("span", { text: `${doneN}/${totalN}`, cls: "it-progress-text" });
 
-      const isCollapsed = totalN > 5;
-      const displayTodos = isCollapsed ? vis.slice(0, 3) : vis;
-
       const tds = card.createDiv({ cls: "it-todos" });
-      for (const td of displayTodos) {
+      for (const td of vis) {
         const isD = td.completed;
         const tr = tds.createDiv({ cls: `it-todo-row ${isD ? "it-todo-done" : ""}` });
         if (td.priority !== 2) {
@@ -608,9 +552,7 @@ export class InboxView extends ItemView {
           }
         });
         const tspan = tr.createEl("span", { text: trunc(td.text, 20), cls: "it-todo-text" });
-        tspan.setAttr("data-tooltip", td.text);
-        tspan.addEventListener("mouseenter", (e) => this.showTooltip(e, td.text));
-        tspan.addEventListener("mouseleave", () => this.hideTooltip());
+        if (td.text.length > 20) tspan.setAttr("title", td.text);
         if (isD && td.completedAt) {
           tr.createEl("span", { text: td.completedAt, cls: "it-todo-done-time" });
         }
@@ -623,99 +565,19 @@ export class InboxView extends ItemView {
           }
         });
       }
-
-      if (isCollapsed) {
-        const hiddenCount = vis.length - 3;
-        const toggleBtn = card.createDiv({ cls: "it-todo-toggle" });
-        toggleBtn.createEl("span", { text: `展开 ${hiddenCount} 条`, cls: "it-todo-toggle-text" });
-        toggleBtn.addEventListener("click", () => {
-          tds.empty();
-          for (const td of vis) {
-            const isD = td.completed;
-            const tr = tds.createDiv({ cls: `it-todo-row ${isD ? "it-todo-done" : ""}` });
-            if (td.priority !== 2) {
-              tr.createEl("span", { text: PRIORITY_LABELS[td.priority], cls: `it-card-prio it-prio-${td.priority}` });
-            }
-            const cb = tr.createEl("input", { type: "checkbox" });
-            cb.checked = isD;
-            cb.addEventListener("change", async () => {
-              const f = this.app.vault.getAbstractFileByPath(task.filePath);
-              if (f instanceof TFile) {
-                const nc = toggleTodoInContent(await this.app.vault.read(f), td.line);
-                await this.app.vault.modify(f, nc);
-              }
-            });
-            const tspan = tr.createEl("span", { text: trunc(td.text, 20), cls: "it-todo-text" });
-            tspan.setAttr("data-tooltip", td.text);
-            tspan.addEventListener("mouseenter", (e) => this.showTooltip(e, td.text));
-            tspan.addEventListener("mouseleave", () => this.hideTooltip());
-            if (isD && td.completedAt) {
-              tr.createEl("span", { text: td.completedAt, cls: "it-todo-done-time" });
-            }
-            const dd = tr.createEl("span", { text: "✕", cls: "it-todo-del" });
-            dd.addEventListener("click", async () => {
-              const f = this.app.vault.getAbstractFileByPath(task.filePath);
-              if (f instanceof TFile) {
-                const nc = removeTodoFromContent(await this.app.vault.read(f), td.line);
-                await this.app.vault.modify(f, nc);
-              }
-            });
-          }
-          toggleBtn.empty();
-          toggleBtn.createEl("span", { text: "收起", cls: "it-todo-toggle-text" });
-          toggleBtn.addEventListener("click", () => {
-            tds.empty();
-            for (const td of vis.slice(0, 3)) {
-              const isD = td.completed;
-              const tr = tds.createDiv({ cls: `it-todo-row ${isD ? "it-todo-done" : ""}` });
-              if (td.priority !== 2) {
-                tr.createEl("span", { text: PRIORITY_LABELS[td.priority], cls: `it-card-prio it-prio-${td.priority}` });
-              }
-              const cb = tr.createEl("input", { type: "checkbox" });
-              cb.checked = isD;
-              cb.addEventListener("change", async () => {
-                const f = this.app.vault.getAbstractFileByPath(task.filePath);
-                if (f instanceof TFile) {
-                  const nc = toggleTodoInContent(await this.app.vault.read(f), td.line);
-                  await this.app.vault.modify(f, nc);
-                }
-              });
-              const tspan = tr.createEl("span", { text: trunc(td.text, 20), cls: "it-todo-text" });
-              tspan.setAttr("data-tooltip", td.text);
-              tspan.addEventListener("mouseenter", (e) => this.showTooltip(e, td.text));
-              tspan.addEventListener("mouseleave", () => this.hideTooltip());
-              if (isD && td.completedAt) {
-                tr.createEl("span", { text: td.completedAt, cls: "it-todo-done-time" });
-              }
-              const dd = tr.createEl("span", { text: "✕", cls: "it-todo-del" });
-              dd.addEventListener("click", async () => {
-                const f = this.app.vault.getAbstractFileByPath(task.filePath);
-                if (f instanceof TFile) {
-                  const nc = removeTodoFromContent(await this.app.vault.read(f), td.line);
-                  await this.app.vault.modify(f, nc);
-                }
-              });
-            }
-            toggleBtn.empty();
-            toggleBtn.createEl("span", { text: `展开 ${hiddenCount} 条`, cls: "it-todo-toggle-text" });
-          });
-        });
-      }
     }
-
-    if (task.todos.length < 10) {
-      const ar = card.createDiv({ cls: "it-todo-add-row" });
-      const ab = ar.createEl("span", { text: "+ 添加待办", cls: "it-btn-add-todo" });
-      ab.addEventListener("click", () => {
-        new AddTodoModal(this.app, async (text, prio) => {
-          const f = this.app.vault.getAbstractFileByPath(task.filePath);
-          if (f instanceof TFile) {
-            const nc = addTodoToContent(await this.app.vault.read(f), text, prio);
-            await this.app.vault.modify(f, nc);
-          }
-        }).open();
-      });
-    }
+    // 添加待办按钮
+    const ar = card.createDiv({ cls: "it-todo-add-row" });
+    const ab = ar.createEl("span", { text: "+ 添加待办", cls: "it-btn-add-todo" });
+    ab.addEventListener("click", () => {
+      new AddTodoModal(this.app, async (text, prio) => {
+        const f = this.app.vault.getAbstractFileByPath(task.filePath);
+        if (f instanceof TFile) {
+          const nc = addTodoToContent(await this.app.vault.read(f), text, prio);
+          await this.app.vault.modify(f, nc);
+        }
+      }).open();
+    });
   }
 
   private getUrgencyClass(d: number | null, ud: number) {
@@ -723,31 +585,6 @@ export class InboxView extends ItemView {
     if (d < 0) return "it-overdue";
     if (d <= ud) return "it-urgent";
     return "it-normal";
-  }
-
-  private showTooltip(e: MouseEvent, text: string) {
-    let tooltip = document.querySelector(".it-tooltip") as HTMLElement;
-    if (!tooltip) {
-      tooltip = document.createElement("div");
-      tooltip.className = "it-tooltip";
-      document.body.appendChild(tooltip);
-    }
-    tooltip.textContent = text;
-    tooltip.style.display = "block";
-    tooltip.style.transform = "none";
-    void tooltip.offsetWidth;
-    const rect = (e.target as HTMLElement).getBoundingClientRect();
-    const tooltipWidth = tooltip.offsetWidth;
-    const centerX = rect.left + rect.width / 2;
-    tooltip.style.left = `${centerX - tooltipWidth / 2}px`;
-    tooltip.style.top = `${rect.top - tooltip.offsetHeight - 8}px`;
-  }
-
-  private hideTooltip() {
-    const tooltip = document.querySelector(".it-tooltip") as HTMLElement;
-    if (tooltip) {
-      tooltip.style.display = "none";
-    }
   }
 }
 
@@ -773,8 +610,8 @@ class QuickAddModal extends Modal {
     contentEl.createEl("h2", { text: "快速添加", cls: "it-modal-title" });
 
     // ── 任务名称（即待办内容） ──
-    const nameWrap = this.makeField(contentEl, "任务名称", "最多20个字，同时作为待办内容");
-    const nameInput = nameWrap.createEl("input", { type: "text", attr: { placeholder: "输入名称", maxlength: "20" } });
+    const nameWrap = this.makeField(contentEl, "任务名称", "最多8个字，同时作为待办内容");
+    const nameInput = nameWrap.createEl("input", { type: "text", attr: { placeholder: "输入名称", maxlength: "8" } });
     nameInput.addEventListener("input", () => this.title = nameInput.value);
     nameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { void this.submit(); } });
 
@@ -876,8 +713,8 @@ class CreateTaskModal extends Modal {
     contentEl.createEl("h2", { text: "批量新建任务", cls: "it-modal-title" });
 
     // ── 名称 ──
-    const nameWrap = this.makeField(contentEl, "任务名称", "最多20个字");
-    const nameInput = nameWrap.createEl("input", { type: "text", attr: { placeholder: "输入名称", maxlength: "20" } });
+    const nameWrap = this.makeField(contentEl, "任务名称", "最多8个字");
+    const nameInput = nameWrap.createEl("input", { type: "text", attr: { placeholder: "输入名称", maxlength: "8" } });
     nameInput.addEventListener("input", () => this.title = nameInput.value);
 
     // ── 优先级 ──
@@ -1060,251 +897,9 @@ class TodoDetailModal extends Modal {
         });
         r.createEl("span", { text: PRIORITY_LABELS[it.priority], cls: `it-card-prio it-prio-${it.priority}` });
         const textEl = r.createEl("span", { text: trunc(it.text, 30), cls: "it-detail-text" });
-        textEl.setAttr("data-tooltip", it.text);
-        textEl.addEventListener("mouseenter", (e) => this.showTooltip(e, it.text));
-        textEl.addEventListener("mouseleave", () => this.hideTooltip());
+        if (it.text.length > 30) textEl.setAttr("title", it.text);
       }
     }
   }
-
-  private showTooltip(e: MouseEvent, text: string) {
-    let tooltip = document.querySelector(".it-tooltip") as HTMLElement;
-    if (!tooltip) {
-      tooltip = document.createElement("div");
-      tooltip.className = "it-tooltip";
-      document.body.appendChild(tooltip);
-    }
-    tooltip.textContent = text;
-    tooltip.style.display = "block";
-    tooltip.style.transform = "none";
-    void tooltip.offsetWidth;
-    const rect = (e.target as HTMLElement).getBoundingClientRect();
-    const tooltipWidth = tooltip.offsetWidth;
-    const centerX = rect.left + rect.width / 2;
-    tooltip.style.left = `${centerX - tooltipWidth / 2}px`;
-    tooltip.style.top = `${rect.top - tooltip.offsetHeight - 8}px`;
-  }
-
-  private hideTooltip() {
-    const tooltip = document.querySelector(".it-tooltip") as HTMLElement;
-    if (tooltip) {
-      tooltip.style.display = "none";
-    }
-  }
-
   onClose() { this.contentEl.empty(); }
-}
-
-/* ══════════════════════════════════════ */
-/* 历史记录弹窗                          */
-/* ══════════════════════════════════════ */
-class HistoryModal extends Modal {
-  private plugin: InboxTrackerPlugin;
-  private dateFilter = "";
-  private typeFilter = "all";
-  private priorityFilter = "all";
-  private searchKeyword = "";
-  private sortBy = "date";
-  private sortOrder = "desc";
-
-  constructor(app: App, plugin: InboxTrackerPlugin) {
-    super(app);
-    this.plugin = plugin;
-  }
-
-  async onOpen() {
-    const { contentEl } = this;
-    contentEl.addClass("it-modal", "it-history-modal");
-    contentEl.createEl("h2", { text: "历史记录", cls: "it-modal-title" });
-
-    await this.renderFilters(contentEl);
-    await this.renderTable(contentEl);
-  }
-
-  private async renderFilters(parent: HTMLElement) {
-    const filterRow = parent.createDiv({ cls: "it-history-filters" });
-
-    const dateInput = filterRow.createEl("input", { type: "date", cls: "it-history-filter-date" });
-    dateInput.addEventListener("input", () => {
-      this.dateFilter = dateInput.value;
-      void this.refreshTable();
-    });
-
-    const typeSelect = filterRow.createEl("select", { cls: "it-history-filter-select" });
-    typeSelect.createEl("option", { text: "全部类型", value: "all" });
-    typeSelect.createEl("option", { text: "快速任务", value: "quick" });
-    typeSelect.createEl("option", { text: "批量任务", value: "full" });
-    typeSelect.addEventListener("change", () => {
-      this.typeFilter = typeSelect.value;
-      void this.refreshTable();
-    });
-
-    const prioritySelect = filterRow.createEl("select", { cls: "it-history-filter-select" });
-    prioritySelect.createEl("option", { text: "全部优先级", value: "all" });
-    prioritySelect.createEl("option", { text: "必做", value: "0" });
-    prioritySelect.createEl("option", { text: "重要", value: "1" });
-    prioritySelect.createEl("option", { text: "一般", value: "2" });
-    prioritySelect.addEventListener("change", () => {
-      this.priorityFilter = prioritySelect.value;
-      void this.refreshTable();
-    });
-
-    const searchInput = filterRow.createEl("input", { type: "text", attr: { placeholder: "搜索任务名称" }, cls: "it-history-filter-search" });
-    searchInput.addEventListener("input", () => {
-      this.searchKeyword = searchInput.value.toLowerCase();
-      void this.refreshTable();
-    });
-
-    const sortSelect = filterRow.createEl("select", { cls: "it-history-filter-select" });
-    sortSelect.createEl("option", { text: "按时间排序", value: "date" });
-    sortSelect.createEl("option", { text: "按名称排序", value: "name" });
-    sortSelect.addEventListener("change", () => {
-      this.sortBy = sortSelect.value;
-      void this.refreshTable();
-    });
-
-    const sortBtn = filterRow.createEl("button", { text: "↑↓", cls: "it-history-sort-btn" });
-    sortBtn.addEventListener("click", () => {
-      this.sortOrder = this.sortOrder === "desc" ? "asc" : "desc";
-      void this.refreshTable();
-    });
-
-    const clearBtn = filterRow.createEl("button", { text: "清除", cls: "it-history-clear-btn" });
-    clearBtn.addEventListener("click", async () => {
-      this.dateFilter = "";
-      this.typeFilter = "all";
-      this.priorityFilter = "all";
-      this.searchKeyword = "";
-      this.sortBy = "date";
-      this.sortOrder = "desc";
-      (dateInput as HTMLInputElement).value = "";
-      typeSelect.value = "all";
-      prioritySelect.value = "all";
-      (searchInput as HTMLInputElement).value = "";
-      sortSelect.value = "date";
-      await this.refreshTable();
-    });
-  }
-
-  private async renderTable(parent: HTMLElement) {
-    let table = parent.querySelector(".it-history-table-wrapper") as HTMLElement | null;
-    if (table) {
-      table.remove();
-    }
-
-    table = parent.createDiv({ cls: "it-history-table-wrapper" });
-    const t = table.createEl("table", { cls: "it-history-table" });
-    const thead = t.createEl("thead");
-    const headerRow = thead.createEl("tr");
-    headerRow.createEl("th", { text: "序号" });
-    headerRow.createEl("th", { text: "历史任务名称" });
-    headerRow.createEl("th", { text: "创建时间" });
-    headerRow.createEl("th", { text: "类型" });
-    headerRow.createEl("th", { text: "优先级" });
-    headerRow.createEl("th", { text: "操作" });
-
-    const tbody = t.createEl("tbody");
-    const records = await this.getFilteredRecords();
-
-    if (records.length === 0) {
-      const emptyRow = tbody.createEl("tr");
-      const emptyCell = emptyRow.createEl("td", { text: "暂无历史记录", cls: "it-history-empty" });
-      emptyCell.colSpan = 6;
-      return;
-    }
-
-    records.forEach((record, index) => {
-      const row = tbody.createEl("tr");
-      row.createEl("td", { text: String(index + 1) });
-      const titleCell = row.createEl("td", { text: record.title, cls: "it-history-title" });
-      titleCell.setAttr("data-tooltip", record.title);
-      titleCell.addEventListener("mouseenter", (e) => this.showTooltip(e, record.title));
-      titleCell.addEventListener("mouseleave", () => this.hideTooltip());
-      const dateCell = row.createEl("td", { text: record.createdAt, cls: "it-history-date" });
-      dateCell.setAttr("data-tooltip", record.createdAt);
-      dateCell.addEventListener("mouseenter", (e) => this.showTooltip(e, record.createdAt));
-      dateCell.addEventListener("mouseleave", () => this.hideTooltip());
-      row.createEl("td", { text: record.taskType === "quick" ? "快速" : "批量" });
-      row.createEl("td", { text: PRIORITY_LABELS[record.priority] });
-      const actionCell = row.createEl("td");
-      const deleteBtn = actionCell.createEl("button", { text: "删除", cls: "it-btn-delete" });
-      deleteBtn.addEventListener("click", async () => {
-        await this.deleteRecord(record.id);
-        await this.refreshTable();
-      });
-    });
-  }
-
-  private async getFilteredRecords() {
-    const records = [...this.plugin.settings.historyRecords];
-
-    const filtered = records.filter(record => {
-      if (this.dateFilter && record.createdAt && !record.createdAt.startsWith(this.dateFilter)) {
-        return false;
-      }
-      if (this.typeFilter !== "all" && record.taskType !== this.typeFilter) {
-        return false;
-      }
-      if (this.priorityFilter !== "all" && String(record.priority) !== this.priorityFilter) {
-        return false;
-      }
-      if (this.searchKeyword && !record.title.toLowerCase().includes(this.searchKeyword)) {
-        return false;
-      }
-      return true;
-    });
-
-    filtered.sort((a, b) => {
-      if (this.sortBy === "date") {
-        return this.sortOrder === "desc"
-          ? (b.createdAt || "").localeCompare(a.createdAt || "")
-          : (a.createdAt || "").localeCompare(b.createdAt || "");
-      } else {
-        return this.sortOrder === "desc"
-          ? b.title.localeCompare(a.title)
-          : a.title.localeCompare(b.title);
-      }
-    });
-
-    return filtered;
-  }
-
-  private async deleteRecord(id: string) {
-    this.plugin.settings.historyRecords = this.plugin.settings.historyRecords.filter(r => r.id !== id);
-    await this.plugin.saveSettings();
-  }
-
-  private async refreshTable() {
-    const contentEl = this.contentEl;
-    await this.renderTable(contentEl);
-  }
-
-  private showTooltip(e: MouseEvent, text: string) {
-    let tooltip = document.querySelector(".it-tooltip") as HTMLElement;
-    if (!tooltip) {
-      tooltip = document.createElement("div");
-      tooltip.className = "it-tooltip";
-      document.body.appendChild(tooltip);
-    }
-    tooltip.textContent = text;
-    tooltip.style.display = "block";
-    tooltip.style.transform = "none";
-    void tooltip.offsetWidth;
-    const rect = (e.target as HTMLElement).getBoundingClientRect();
-    const tooltipWidth = tooltip.offsetWidth;
-    const centerX = rect.left + rect.width / 2;
-    tooltip.style.left = `${centerX - tooltipWidth / 2}px`;
-    tooltip.style.top = `${rect.top - tooltip.offsetHeight - 8}px`;
-  }
-
-  private hideTooltip() {
-    const tooltip = document.querySelector(".it-tooltip") as HTMLElement;
-    if (tooltip) {
-      tooltip.style.display = "none";
-    }
-  }
-
-  onClose() {
-    this.contentEl.empty();
-  }
 }

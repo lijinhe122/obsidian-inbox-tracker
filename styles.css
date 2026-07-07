@@ -34,6 +34,8 @@
 .it-btn-quick:hover { background: #FB8C00; box-shadow: 0 2px 8px rgba(255,152,0,0.3); }
 .it-btn-add   { background: #7C4DFF; color: #fff; box-shadow: 0 1px 4px rgba(124,77,255,0.2); }
 .it-btn-add:hover   { background: #651FFF; box-shadow: 0 2px 8px rgba(124,77,255,0.3); }
+.it-btn-refresh { background: var(--background-secondary); color: var(--text-normal); border: 1px solid var(--background-modifier-border); }
+.it-btn-refresh:hover { background: var(--background-hover); }
 
 /* ── Stats chips ────────────────────── */
 .it-stats { display: flex; gap: 6px; flex-wrap: wrap; }
